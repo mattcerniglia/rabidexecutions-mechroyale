@@ -18,7 +18,7 @@ def _inpoly(px, py, ring):
 
 
 class Nav:
-    def __init__(self, mapdir):
+    def __init__(self, mapdir, nooks=True, roofs=True):
         with open(os.path.join(mapdir, "v2/world.json")) as fh:
             w = json.load(fh)
         T = w["terrain"]
@@ -50,35 +50,40 @@ class Nav:
             for dx in (-1, 0, 1): d |= pad[1 + dy:1 + dy + self.ny2, 1 + dx:1 + dx + self.nx2]
         self.free = ~d; self.F = self.free.ravel().tolist()
         self._inf = [math.inf] * (self.nx2 * self.ny2)                 # copied (pointer copy, ~1 ms) to start each field
-        # enclosure: for each walkable 2 m cell, which of 16 directions hit a wall (building/ledge) within 18 m.
-        # Highly enclosed cells are nooks: attackers can only come through the open arc, one at a time.
-        ndir = 16; blocked = np.zeros((ndir, ny, nx), bool); tall = (top - H) > 5.0            # walls that also stop shots
-        for k in range(ndir):
-            a = 2 * math.pi * k / ndir; ca, sa = math.cos(a), math.sin(a)
-            for dist in range(2, 19, 2):
-                dx, dy = int(round(dist * ca)), int(round(dist * sa))
-                src = tall[max(0, dy):ny + min(0, dy), max(0, dx):nx + min(0, dx)]
-                blocked[k, max(0, -dy):ny - max(0, dy), max(0, -dx):nx - max(0, dx)] |= src
-        enc = blocked.sum(0)[1:self.ny2 * 2:2, 1:self.nx2 * 2:2]                    # sample at 2 m cell centres
-        ox = sum(np.cos(2 * math.pi * k / ndir) * ~blocked[k, 1:self.ny2 * 2:2, 1:self.nx2 * 2:2] for k in range(ndir))
-        oy = sum(np.sin(2 * math.pi * k / ndir) * ~blocked[k, 1:self.ny2 * 2:2, 1:self.nx2 * 2:2] for k in range(ndir))
-        enc = np.where(self.free, enc, 0)
-        self.ENC = enc.ravel().tolist(); self.OPEN = np.arctan2(oy, ox).ravel().tolist()
-        del blocked
-        # sightlines: mean over 16 directions of the distance to the first tall wall (capped at 60 m) on the 2 m grid.
-        # Low = few long lines of fire reach this cell (what a hold position needs; enclosure alone can face a field).
-        t2 = tall[:self.ny2 * 2, :self.nx2 * 2].reshape(self.ny2, 2, self.nx2, 2).any((1, 3))
-        cap = 60.0; total = np.zeros((self.ny2, self.nx2), np.float32)
-        for k in range(ndir):
-            a = 2 * math.pi * k / ndir; ca, sa = math.cos(a), math.sin(a); dk = np.full((self.ny2, self.nx2), cap, np.float32)
-            for st in range(1, 31):
-                dx, dy = int(round(st * ca)), int(round(st * sa))
-                if dx == 0 and dy == 0: continue
-                src = t2[max(0, dy):self.ny2 + min(0, dy), max(0, dx):self.nx2 + min(0, dx)]
-                view = dk[max(0, -dy):self.ny2 - max(0, dy), max(0, -dx):self.nx2 - max(0, dx)]
-                np.minimum(view, np.where(src, np.float32(2.0 * st), np.float32(cap)), out=view)
-            total += dk
-        self.SIGHT = np.where(self.free, total / ndir, cap).ravel().tolist()
+        if nooks:                                                      # only builds that hold nooks pay for this
+            # enclosure: for each walkable 2 m cell, which of 16 directions hit a wall (building/ledge) within 18 m.
+            # Highly enclosed cells are nooks: attackers can only come through the open arc, one at a time.
+            ndir = 16; blocked = np.zeros((ndir, ny, nx), bool); tall = (top - H) > 5.0            # walls that also stop shots
+            for k in range(ndir):
+                a = 2 * math.pi * k / ndir; ca, sa = math.cos(a), math.sin(a)
+                for dist in range(2, 19, 2):
+                    dx, dy = int(round(dist * ca)), int(round(dist * sa))
+                    src = tall[max(0, dy):ny + min(0, dy), max(0, dx):nx + min(0, dx)]
+                    blocked[k, max(0, -dy):ny - max(0, dy), max(0, -dx):nx - max(0, dx)] |= src
+            enc = blocked.sum(0)[1:self.ny2 * 2:2, 1:self.nx2 * 2:2]                    # sample at 2 m cell centres
+            ox = sum(np.cos(2 * math.pi * k / ndir) * ~blocked[k, 1:self.ny2 * 2:2, 1:self.nx2 * 2:2] for k in range(ndir))
+            oy = sum(np.sin(2 * math.pi * k / ndir) * ~blocked[k, 1:self.ny2 * 2:2, 1:self.nx2 * 2:2] for k in range(ndir))
+            enc = np.where(self.free, enc, 0)
+            self.ENC = enc.ravel().tolist(); self.OPEN = np.arctan2(oy, ox).ravel().tolist()
+            del blocked
+            # sightlines: mean over 16 directions of the distance to the first tall wall (capped at 60 m) on the 2 m grid.
+            # Low = few long lines of fire reach this cell (what a hold position needs; enclosure alone can face a field).
+            t2 = tall[:self.ny2 * 2, :self.nx2 * 2].reshape(self.ny2, 2, self.nx2, 2).any((1, 3))
+            cap = 60.0; total = np.zeros((self.ny2, self.nx2), np.float32)
+            for k in range(ndir):
+                a = 2 * math.pi * k / ndir; ca, sa = math.cos(a), math.sin(a); dk = np.full((self.ny2, self.nx2), cap, np.float32)
+                for st in range(1, 31):
+                    dx, dy = int(round(st * ca)), int(round(st * sa))
+                    if dx == 0 and dy == 0: continue
+                    src = t2[max(0, dy):self.ny2 + min(0, dy), max(0, dx):self.nx2 + min(0, dx)]
+                    view = dk[max(0, -dy):self.ny2 - max(0, dy), max(0, -dx):self.nx2 - max(0, dx)]
+                    np.minimum(view, np.where(src, np.float32(2.0 * st), np.float32(cap)), out=view)
+                total += dk
+            self.SIGHT = np.where(self.free, total / ndir, cap).ravel().tolist()
+        self.roofs = []
+        if roofs:
+            try: self.roofs = self._roof_catalog(w["prisms"])
+            except Exception: self.roofs = []
         jj, ii = np.mgrid[0:self.ny2, 0:self.nx2]; self.cx = (minX + 2 * ii + 1).ravel(); self.cy = (minY + 2 * jj + 1).ravel()
 
     # ---- grid lookups ------------------------------------------------------------------------------------------
@@ -196,6 +201,66 @@ class Nav:
                     if F[v] and dd + c < dist[v] and (c < 2.5 or (F[j * nx2 + ii] and F[jj * nx2 + i])):
                         dist[v] = dd + c; push(hp, (dd + c, v))
         return not hp
+
+    # ---- roofs ---------------------------------------------------------------------------------------------------
+    @staticmethod
+    def _inside(px, py, ring):
+        xs, ys = ring[0::2], ring[1::2]; ins = False; j = len(xs) - 1
+        for i in range(len(xs)):
+            if (ys[i] > py) != (ys[j] > py) and px < (xs[j] - xs[i]) * (py - ys[i]) / (ys[j] - ys[i] + 1e-12) + xs[i]: ins = not ins
+            j = i
+        return ins
+
+    @staticmethod
+    def _edge_dist(px, py, ring):
+        xs, ys = ring[0::2], ring[1::2]; best = 1e9; j = len(xs) - 1
+        for i in range(len(xs)):
+            ax, ay, bx, by = xs[j], ys[j], xs[i], ys[i]; dx, dy = bx - ax, by - ay; L2 = dx * dx + dy * dy or 1e-9
+            u = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2)); best = min(best, math.hypot(px - ax - u * dx, py - ay - u * dy)); j = i
+        return best
+
+    def _roof_catalog(self, prisms):
+        """Flat building roofs 10-45 m up (climbable on a full jet tank) with a perch >= 8 m from every edge and a
+        walkable approach cell just outside the wall nearest the perch."""
+        out = []
+        for idx, p in enumerate(prisms):
+            if p.get("kind") != "building": continue
+            ring = p["ring"]; xs, ys = ring[0::2], ring[1::2]; n = len(xs)
+            if n < 3 or max(xs) - min(xs) < 24 or max(ys) - min(ys) < 24: continue
+            g = sorted(self.ground(xs[k], ys[k]) for k in range(n))[n // 2]; height = p["top"] - g
+            if not (10.0 <= height <= 45.0) or p["base"] > g + 1.5: continue
+            holes = p.get("holes") or []
+            if holes and not isinstance(holes[0], list): holes = [holes]
+            mx, my = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+            a2 = cxs = cys = 0.0; j = n - 1
+            for i in range(n):
+                cr = xs[j] * ys[i] - xs[i] * ys[j]; a2 += cr; cxs += (xs[j] + xs[i]) * cr; cys += (ys[j] + ys[i]) * cr; j = i
+            cands = [(cxs / (3 * a2), cys / (3 * a2))] if abs(a2) > 1e-6 else []
+            cands += [(mx, my)] + [((mx + qx) / 2, (my + qy) / 2) for qx in (min(xs), max(xs)) for qy in (min(ys), max(ys))]
+            best = None
+            for (cx, cy) in cands:
+                if not self._inside(cx, cy, ring) or any(self._inside(cx, cy, hr) for hr in holes): continue
+                de = self._edge_dist(cx, cy, ring)
+                if de >= 8.0 and (best is None or de > best[2]): best = (cx, cy, de)
+            if best is None: continue
+            cx, cy, de = best; appr = None; j = n - 1
+            for i in range(n):                               # sample the walls every 3 m, step 3.5 m outward
+                ax, ay, bx, by = xs[j], ys[j], xs[i], ys[i]; L = math.hypot(bx - ax, by - ay); j = i
+                if L < 1e-6: continue
+                nxv, nyv = (by - ay) / L, -(bx - ax) / L
+                for k in range(int(L // 3) + 1):
+                    ex, ey = ax + (bx - ax) * min(1.0, (k * 3 + 1.5) / L), ay + (by - ay) * min(1.0, (k * 3 + 1.5) / L)
+                    sgn = -1.0 if self._inside(ex + nxv, ey + nyv, ring) else 1.0
+                    qx, qy = ex + sgn * 3.5 * nxv, ey + sgn * 3.5 * nyv
+                    if not self.free_at(qx, qy): continue
+                    d = math.hypot(qx - cx, qy - cy)
+                    if appr is None or d < appr[0]: appr = (d, qx, qy)
+            if appr is None: continue
+            out.append({"id": idx, "top": p["top"], "height": height, "perch": (cx, cy), "edge": de, "approach": (appr[1], appr[2]), "ring": ring})
+        return out
+
+    def on_roof(self, roof, x, y, z):
+        return z >= roof["top"] - 0.8 and self._inside(x, y, roof["ring"])
 
     def nearest_free(self, gx, gy):
         """Centre of the walkable cell closest to (gx, gy) - where to stand when the true point is inside a building."""

@@ -61,6 +61,12 @@ EXPOSURE_COVER = False        # B: cover = nearest walkable cell hidden from eve
 BACK_WALL = False             # C: among nearby hidden cells prefer one with a wall behind us (no x1.5 rear hits)
 NPC_DEFENSE = False           # a drone shooting us becomes the target whenever no hunter is in sight (kill it, don't stand in it)
 STRICT_HIDDEN = False         # "am I in cover": centre and top rays at full resolution, and any hunter hit in the last 0.6 s = exposed
+ROOF = False                  # azing style: after the opening economy, climb a big flat roof and hold its middle
+ROOF_T = 60.0                 # start looking for a roof after this many seconds ...
+ROOF_CUBES = 10               # ... or once we have this many cubes
+ROOF_R = 260.0                # roofs considered within this distance (approach point)
+CAMP = False                  # top-practice style: stand still to fight (<70 m), move silently while hunters are within 150 m,
+CAMP_CONTACT = 150.0          # no chasing / farming while in contact, full speed only when alone
 SNIPER = False                # prefer the laser (hitscan) and fight at SNIPER_BAND, kiting inward hunters: sloppy house aim decays with range
 SNIPER_BAND = (110.0, 170.0)
 LOOT_CUBES = False            # grab kill-drop cubes / wanted weapons within LOOT_R whenever no enemy has sight within 70 m
@@ -185,7 +191,7 @@ class Bot:
         self.map_dir = hello["map"]["dir"]
         self.nav = None; self.nav_loading = False; self.nav_tries = 0
         if Nav:
-            try: self.nav = Nav(self.map_dir)
+            try: self.nav = Nav(self.map_dir, nooks=NOOK, roofs=ROOF)
             except Exception as e: mf.log("nav init failed:", repr(e))
         self.base_r, self.base_h = M["radius"], M["height"]
         self.size_per_cube = c["cubes"].get("size_per_cube", 0.05); self.cube_cap = c["cubes"].get("stat_cap", 10)
@@ -209,6 +215,7 @@ class Bot:
         self.aggr = AGGRESSION_SCALE; self.outnumbered_falls = 0
         self.resetting = False; self.reset_cover = None; self.reset_cover_t = -99.0; self.resets = 0
         self.npc_hit = None; self.laser_hit = None
+        self.roof = None; self.roof_black = set(); self.roof_climb_t = -1.0; self.roof_field = None; self.roof_jump = False
         self.nooks = None; self.nook = None; self.nook_t = -99.0; self.nook_field = None
         if NOOK and self.nav is not None and hasattr(self.nav, "ENC"): self.build_nooks()
         if VARIANT != "baseline": self.name = ("rabid-v6-" + str(VARIANT))[:32]
@@ -217,7 +224,7 @@ class Bot:
 
     # ---- map helpers --------------------------------------------------------------------------------------------
     def _load_nav(self):
-        try: self.nav = Nav(self.map_dir)
+        try: self.nav = Nav(self.map_dir, nooks=NOOK, roofs=ROOF)
         except Exception as e: mf.log("nav retry failed:", repr(e))
         self.nav_loading = False
 
@@ -384,6 +391,13 @@ class Bot:
         """Path fields only on light ticks: nook field (start, then steps until our cell is settled), else zone field."""
         if time.perf_counter() - t0 > 0.012: return
         nv = self.nav
+        if ROOF and nv is not None and self.roof is not None:
+            r = self.roof
+            if self.roof_field is None or self.roof_field[0] != r["id"]:
+                self.roof_field = [r["id"], nv.field_start(r["approach"][0], r["approach"][1], 3.0)]; return
+            j, i = nv.cell(x, y); me_u = j * nv.nx2 + i
+            if self.roof_field[1][0][me_u] == math.inf and self.roof_field[1][1]:
+                nv.field_step(self.roof_field[1], 2500, me_u if nv.F[me_u] else None); return
         if NOOK and nv is not None and self.nook is not None:
             nk = self.nook
             if self.nook_field is None or self.nook_field[0] != nk[4]:
@@ -419,16 +433,33 @@ class Bot:
     def loot_target(self, obs, me, W, slot, x, y, z, t):
         """Nearest wanted pickup or (below the stat cap) cube within LOOT_R on our level; kill drops are the main source."""
         if getattr(self, "_lt_t", None) == t: return self._lt
-        best = None
-        wp = self.wanted_pickup(obs, W, slot, x, y, z, t, LOOT_R)
+        best = None; R = 30.0 if (CAMP and getattr(self, "contact_d", 1e9) < CAMP_CONTACT) else LOOT_R
+        wp = self.wanted_pickup(obs, W, slot, x, y, z, t, R)
         if wp is not None: best = (math.hypot(wp["pos"][0] - x, wp["pos"][1] - y) * 0.7, wp)
         if me["cubes"] < self.cube_cap:
             for c in obs["cubes"]:
                 if self.black.get(c["id"], -1) > t or abs(c["pos"][2] - z) > 3.5: continue
                 d = math.hypot(c["pos"][0] - x, c["pos"][1] - y)
-                if d < LOOT_R and (best is None or d < best[0]): best = (d, c)
+                if d < R and (best is None or d < best[0]): best = (d, c)
         self._lt_t, self._lt = t, (best[1] if best else None)
         return self._lt
+
+    def choose_roof(self, x, y, zs, walk):
+        best, bs = None, 1e18
+        for r in getattr(self.nav, "roofs", []):
+            if r["id"] in self.roof_black: continue
+            ax, ay = r["approach"]; d = math.hypot(ax - x, ay - y)
+            if d > ROOF_R or not self.zone_ok(r["perch"][0], r["perch"][1], zs, walk): continue
+            sc = d - 1.0 * r["edge"]                          # nearer, and deeper roofs (more room from the edges)
+            if sc < bs: bs, best = sc, r
+        return best
+
+    def roof_waypoint(self, x, y):
+        r = self.roof; ax, ay = r["approach"]; nv = self.nav
+        if self.roof_field is not None and self.roof_field[0] == r["id"]:
+            res = nv.follow(self.roof_field[1][0], x, y)
+            if res and res[1] > 0 and math.hypot(res[0][0] - x, res[0][1] - y) > 0.5: return res[0]
+        return (ax, ay)
 
     def is_hidden(self, t, x, y, z, thr):
         if not self.nav or not thr: return False
@@ -632,6 +663,7 @@ class Bot:
         tp = self.mem.threat_point(t, x, y)
 
         hunters_known = bool(enemies) or any(t - tr["t"] < 30.0 for tr in self.mem.tracks.values()) or t - self.last_mech_dmg_t < 10.0
+        self.contact_d = min([e["d"] for e in enemies] + [math.hypot(tr["pos"][0] - x, tr["pos"][1] - y) for tr in self.mem.tracks.values() if t - tr["t"] < 10.0] + [1e9])
         at_nook = False
         if NOOK and self.nav and hasattr(self.nav, "ENC") and hunters_known:
             if self.nook is None or t - self.nook_t > 8.0 or not self.zone_ok(self.nook[0], self.nook[1], zs, walk):
@@ -640,6 +672,13 @@ class Bot:
                 elif nk is None: self.nook = None
                 self.nook_t = t
             at_nook = self.nook is not None and math.hypot(self.nook[0] - x, self.nook[1] - y) <= 4.0
+        on_roof = False; self.roof_jump = False
+        if ROOF and self.nav is not None and hasattr(self.nav, "roofs"):
+            if self.roof is not None and not self.zone_ok(self.roof["perch"][0], self.roof["perch"][1], zs, walk):
+                self.roof = None; self.roof_climb_t = -1.0                      # the zone left our roof: come down and move on
+            if self.roof is None and (t >= ROOF_T or me["cubes"] >= ROOF_CUBES) and t >= 5.0 and int(t * 10) % 20 == 0:
+                self.roof = self.choose_roof(x, y, zs, walk)
+            on_roof = self.roof is not None and self.nav.on_roof(self.roof, x, y, z)
         angry_npc = None
         if NPC_DEFENSE and tgt is None:
             cands = [m for m in obs["mechs"] if m["kind"] == "npc" and t - self.npc_angry.get(m["id"], -99) < 3.0]
@@ -666,6 +705,26 @@ class Bot:
                 else: self.cover = self.find_cover(x, y, z, pts, zs)[0]
                 self.cover_t = t
             mv = self.toward(x, y, self.cover[0], self.cover[1]); boost = energy > (35 if lt else 20); mode = "retreat"
+        elif ROOF and self.roof is not None and not zs["urgent"] and (on_roof or tgt is None or
+                math.hypot(self.roof["approach"][0] - x, self.roof["approach"][1] - y) < 40.0):
+            r = self.roof; px, py = r["perch"]
+            if on_roof:
+                d = math.hypot(px - x, py - y); self.roof_climb_t = -1.0
+                mv = ((px - x) / d, (py - y) / d) if d > 2.0 else (0.0, 0.0); mode = "roof"
+            else:
+                ax, ay = r["approach"]; da = math.hypot(ax - x, ay - y)
+                if da > 2.5 and self.roof_climb_t < 0:
+                    wx, wy = self.roof_waypoint(x, y); mv = self.toward(x, y, wx, wy); mode = "->roof"
+                else:
+                    need = min(95.0, r["height"] * 1.7 + 15.0)
+                    if self.roof_climb_t < 0 and energy < need: mode = "roof-wait"           # tank up at the wall first
+                    else:
+                        if self.roof_climb_t < 0: self.roof_climb_t = t
+                        d = math.hypot(px - x, py - y) or 1.0; mv = ((px - x) / d, (py - y) / d); mode = "climb"
+                        if me["grounded"] and z < r["top"] - 1.0: self.roof_jump = True
+                        boost = (not me["grounded"]) and z < r["top"] + 1.5
+                        if t - self.roof_climb_t > 8.0:                                     # did not make it: try another roof
+                            self.roof_black.add(r["id"]); self.roof = None; self.roof_climb_t = -1.0
         elif LASER_EVADE and self.laser_dodge(t, x, y, z, enemies, zs, energy) is not None:
             mv, boost, mode = self.laser_dodge(t, x, y, z, enemies, zs, energy)
         elif angry_npc is not None and not any(e["los"] for e in enemies):
@@ -732,10 +791,10 @@ class Bot:
             else: mode = "ambush"                            # hidden: let them come around the corner one at a time
         elif hidden and t - self.last_seen_t < 4.0:
             mode = "hold"                                    # it went behind cover: hold the angle, it has to come back out
-        elif hidden and hpf > 0.7 and not self.retreating and self.aggr >= 0.3:
+        elif hidden and hpf > 0.7 and not self.retreating and self.aggr >= 0.3 and not CAMP:
             e = min(hidden, key=lambda e: e["d"]); mv = self.toward(x, y, e["pos"][0], e["pos"][1], min(1.0, 0.6 * self.aggr)); mode = "hunt %d" % e["id"]
         else:
-            farm = None if (self.retreating or t - self.last_mech_dmg_t < 4.0) else self.farm_target(obs, me, x, y, z, zs, slot, walk, t)
+            farm = None if (self.retreating or t - self.last_mech_dmg_t < 4.0 or (CAMP and self.contact_d < CAMP_CONTACT)) else self.farm_target(obs, me, x, y, z, zs, slot, walk, t)
             if farm:
                 _, kind, o = farm; px, py = o["pos"][0], o["pos"][1]; d = math.hypot(px - x, py - y); mode = "farm " + kind
                 if kind == "pickup":
@@ -759,9 +818,17 @@ class Bot:
             if px or py:
                 vx, vy = mv[0] + 1.5 * px, mv[1] + 1.5 * py; n = math.hypot(vx, vy) or 1.0; m0 = math.hypot(*mv)
                 mv = (vx / n * m0, vy / n * m0)
+        if CAMP:
+            if mode.startswith("fight") and tgt is not None and tgt["d"] >= 15:
+                mv = (0.0, 0.0); boost = False                       # stand and shoot
+            elif self.contact_d < CAMP_CONTACT and mode.split(" ")[0] in ("walk", "farm", "loot", "->nook", "ambush-move", "hunt", "idle", "hold", "nook", "ambush"):
+                m0 = math.hypot(*mv); cap = 0.95 * self.step_speed / walk
+                if m0 > cap: mv = (mv[0] / m0 * cap, mv[1] / m0 * cap)
+                boost = False                                        # silent: no footsteps while hunters are near
         # stuck: wanted to move for 3 s but never got 1.5 m from where we were
         moving = math.hypot(*mv) > 0.2
         self.hist.append((t, x, y, moving)); self.hist = [h for h in self.hist if t - h[0] <= 3.0]
+        if mode in ("climb", "roof", "roof-wait"): self.hist = []
         if (tick >= self.unstick_until and len(self.hist) >= 25 and all(h[3] for h in self.hist)
                 and max(math.hypot(h[1] - self.hist[0][1], h[2] - self.hist[0][2]) for h in self.hist) < 1.5):
             self.unstick_until = tick + 16; self.unstick_sign = -self.unstick_sign
@@ -770,6 +837,7 @@ class Bot:
         if tick < self.unstick_until and moving:
             yaw = math.atan2(mv[1], mv[0]) + self.unstick_sign * PI / 2; mv = (math.cos(yaw), math.sin(yaw))
             jump = tick % 4 == 0; boost = not me["grounded"]; mode += " UNSTICK"
+        if self.roof_jump: jump = True
 
         # ---- torso ----
         aim, fire = None, [False, False]
