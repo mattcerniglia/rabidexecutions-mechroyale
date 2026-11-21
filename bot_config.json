@@ -1,1 +1,1 @@
-{"VARIANT": "baseline", "TUNABLES": {"NPC_DEFENSE": true, "LASER_EVADE": true}}
+{"VARIANT": "baseline", "TUNABLES": {"NPC_DEFENSE": true, "FIGHT_RESET": true, "EXPOSURE_COVER": true, "STRICT_HIDDEN": true}}
