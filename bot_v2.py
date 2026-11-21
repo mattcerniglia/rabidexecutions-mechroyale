@@ -18,9 +18,9 @@ class Bot:
 
     def __init__(self, hello):
         c = hello["config"]; self.step_speed = c["sound"]["step_speed"]; self.reach = c["loot"]["pickup_radius"] - 0.5
-        self.nav = None
+        self.nav = None; self.map_dir = hello["map"]["dir"]; self.nav_loading = False; self.nav_tries = 0
         if Nav:
-            try: self.nav = Nav(hello["map"]["dir"])
+            try: self.nav = Nav(self.map_dir)
             except Exception as e: mf.log("nav init failed:", repr(e))
         self.field = None; self.field_key = None; self.want_key = None; self.busy = False
         self.threat = None; self.hist = []; self.unstick_until = -1; self.unstick_sign = 1; self.black = {}; self.mode = "init"
@@ -33,6 +33,11 @@ class Bot:
             self.field, self.field_key = f, key
         except Exception as e: mf.log("field failed:", repr(e))
         self.busy = False
+
+    def _load_nav(self):
+        try: self.nav = Nav(self.map_dir)
+        except Exception as e: mf.log("nav retry failed:", repr(e))
+        self.nav_loading = False
 
     def goal(self, zone):
         gx, gy = zone["next_center"]; r = zone["next_radius"]; return (round(gx), round(gy), 6 if r <= 0 else max(8, round(0.45 * r)))
@@ -51,6 +56,8 @@ class Bot:
     # ---- per tick ---------------------------------------------------------------------------------------------
     def act(self, obs):
         me, t, tick, zone = obs["self"], obs["t"], obs["tick"], obs["zone"]; x, y, z = me["pos"]; st = me["stats"]
+        if self.nav is None and Nav and not self.nav_loading and self.nav_tries < 5 and tick % 20 == 0:
+            self.nav_loading = True; self.nav_tries += 1; threading.Thread(target=self._load_nav, daemon=True).start()
         act = {"tick": tick, "boost": False}
         walk = st["walk_speed"]; silent = 0.95 * self.step_speed / walk
         for e in obs["events"]:
