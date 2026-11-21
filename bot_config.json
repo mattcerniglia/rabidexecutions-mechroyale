@@ -1,1 +1,1 @@
-{"VARIANT": "baseline", "TUNABLES": {"NPC_DEFENSE": true, "LOOT_CUBES": true, "LASER_EVADE": true, "SNIPER": true, "CUBE_AVOID": true}}
+{"VARIANT": "baseline", "TUNABLES": {"NPC_DEFENSE": true, "LOOT_CUBES": true, "LASER_EVADE": true, "SNIPER": true, "AMBUSH": true}}
