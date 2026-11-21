@@ -61,6 +61,9 @@ EXPOSURE_COVER = False        # B: cover = nearest walkable cell hidden from eve
 BACK_WALL = False             # C: among nearby hidden cells prefer one with a wall behind us (no x1.5 rear hits)
 NPC_DEFENSE = False           # a drone shooting us becomes the target whenever no hunter is in sight (kill it, don't stand in it)
 STRICT_HIDDEN = False         # "am I in cover": centre and top rays at full resolution, and any hunter hit in the last 0.6 s = exposed
+LOOT_CUBES = False            # grab kill-drop cubes / wanted weapons within LOOT_R whenever no enemy has sight within 70 m
+LOOT_R = 70.0
+LOOT_SAFE = 60.0              # ... and no enemy in sight closer than this
 LASER_EVADE = False           # sidestep ANY visible laser charging at us; break sight (to cover) from lasers hitting us from > 110 m
 LASER_FAR = 110.0             # beyond this a laser duel is a losing trade for our gun
 CUBE_AVOID = False            # at the stat cap, sidestep cubes: past 10 they only make us bigger (+5% size each)
@@ -411,6 +414,20 @@ class Bot:
         self._ld_t, self._ld = t, res
         return res
 
+    def loot_target(self, obs, me, W, slot, x, y, z, t):
+        """Nearest wanted pickup or (below the stat cap) cube within LOOT_R on our level; kill drops are the main source."""
+        if getattr(self, "_lt_t", None) == t: return self._lt
+        best = None
+        wp = self.wanted_pickup(obs, W, slot, x, y, z, t, LOOT_R)
+        if wp is not None: best = (math.hypot(wp["pos"][0] - x, wp["pos"][1] - y) * 0.7, wp)
+        if me["cubes"] < self.cube_cap:
+            for c in obs["cubes"]:
+                if self.black.get(c["id"], -1) > t or abs(c["pos"][2] - z) > 3.5: continue
+                d = math.hypot(c["pos"][0] - x, c["pos"][1] - y)
+                if d < LOOT_R and (best is None or d < best[0]): best = (d, c)
+        self._lt_t, self._lt = t, (best[1] if best else None)
+        return self._lt
+
     def is_hidden(self, t, x, y, z, thr):
         if not self.nav or not thr: return False
         if not STRICT_HIDDEN: return self.nav.hidden(x, y, z, thr)
@@ -673,6 +690,14 @@ class Bot:
                 else: mv = self.toward(x, y, grab["pos"][0], grab["pos"][1])
                 if A.get("drop") is None: A.pop("drop", None)
             boost = (aimed_at_me and energy > 15) or (not lt_ready and energy > BOOST_E and tgt["d"] > 40)
+        elif LOOT_CUBES and t - self.last_mech_dmg_t > 2.0 and not any(e["los"] and e["d"] < LOOT_SAFE for e in enemies) \
+                and self.loot_target(obs, me, W, slot, x, y, z, t) is not None:
+            o = self.loot_target(obs, me, W, slot, x, y, z, t); px, py = o["pos"][0], o["pos"][1]; d = math.hypot(px - x, py - y)
+            if "kind" in o and d < self.reach:
+                A["take"] = o["id"]
+                if not any(w is None for w in W) and "laser" in slot: A["drop"] = slot["laser"]
+            else: mv = self.toward(x, y, px, py); boost = energy > 40 and d > 15
+            mode = "loot"
         elif NOOK and self.nook is not None and hunters_known and not unseen_hit:
             if at_nook: mode = "nook"
             else: wx, wy = self.nook_waypoint(x, y); mv = self.toward(x, y, wx, wy); mode = "->nook"
