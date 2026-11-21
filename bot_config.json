@@ -1,1 +1,1 @@
-{"VARIANT": "baseline", "TUNABLES": {"NPC_DEFENSE": true, "LOOT_CUBES": true, "LASER_EVADE": true, "SNIPER": true, "ROOF": true}}
+{"VARIANT": "baseline", "TUNABLES": {"NPC_DEFENSE": true, "LOOT_CUBES": true, "LASER_EVADE": true, "SNIPER": true, "ROOF": true, "ROOF_T": 120.0, "ROOF_CUBES": 99}}
