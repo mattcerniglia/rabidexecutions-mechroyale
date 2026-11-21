@@ -61,6 +61,8 @@ EXPOSURE_COVER = False        # B: cover = nearest walkable cell hidden from eve
 BACK_WALL = False             # C: among nearby hidden cells prefer one with a wall behind us (no x1.5 rear hits)
 NPC_DEFENSE = False           # a drone shooting us becomes the target whenever no hunter is in sight (kill it, don't stand in it)
 STRICT_HIDDEN = False         # "am I in cover": centre and top rays at full resolution, and any hunter hit in the last 0.6 s = exposed
+SNIPER = False                # prefer the laser (hitscan) and fight at SNIPER_BAND, kiting inward hunters: sloppy house aim decays with range
+SNIPER_BAND = (110.0, 170.0)
 LOOT_CUBES = False            # grab kill-drop cubes / wanted weapons within LOOT_R whenever no enemy has sight within 70 m
 LOOT_R = 70.0
 LOOT_SAFE = 60.0              # ... and no enemy in sight closer than this
@@ -468,13 +470,25 @@ class Bot:
                 yaw = self.steer(x, y, math.atan2(y - ly, x - lx)); return (math.cos(yaw), math.sin(yaw))
         return None
 
+    def pickup_pref(self, k, slot, empty):
+        """Priority weight (lower = more wanted) for a weapon pickup of kind k, or None if we do not want it."""
+        first, second = ("laser", "lightning") if SNIPER else ("lightning", "laser")
+        if k == first and first not in slot and (empty or second in slot): return 0.4
+        if k == second and empty and first not in slot and second not in slot: return 0.6
+        return None
+
+    def swap_slot(self, slot, W):
+        """Slot to drop when taking the preferred weapon with both slots full."""
+        if any(w is None for w in W): return None
+        second = "lightning" if SNIPER else "laser"
+        return slot.get(second)
+
     def wanted_pickup(self, obs, W, slot, x, y, z, t, maxd):
         empty = any(w is None for w in W); best = None
         for p in obs["pickups"]:
             if self.black.get(p["id"], -1) > t or abs(p["pos"][2] - z) > 3.5: continue
             k = p["kind"]
-            ok = (k == "lightning" and "lightning" not in slot and (empty or "laser" in slot)) or \
-                 (k == "laser" and empty and "lightning" not in slot and "laser" not in slot)
+            ok = self.pickup_pref(k, slot, empty) is not None
             d = math.hypot(p["pos"][0] - x, p["pos"][1] - y)
             if ok and d < maxd and (best is None or d < best[0]): best = (d, p)
         return best[1] if best else None
@@ -496,9 +510,8 @@ class Bot:
         for p in obs["pickups"]:
             if self.black.get(p["id"], -1) > t or abs(p["pos"][2] - z) > 3.5: continue
             k = p["kind"]
-            if k == "lightning" and "lightning" not in slot and (empty or "laser" in slot): pr = 0.4
-            elif k == "laser" and empty and "lightning" not in slot and "laser" not in slot: pr = 0.6
-            else: continue
+            pr = self.pickup_pref(k, slot, empty)
+            if pr is None: continue
             d = math.hypot(p["pos"][0] - x, p["pos"][1] - y)
             if d < 160: cands.append((d * pr, "pickup", p))
         if me["cubes"] < self.cube_cap:
@@ -669,7 +682,8 @@ class Bot:
             mode = "regen-hold"                              # out of its reach for now: stay put, let regen start
         elif tgt:
             m = tgt["m"]; ew = m.get("weapons") or []
-            if lt_ready: lo, hi = BAND_LT
+            if SNIPER and las is not None: lo, hi = SNIPER_BAND
+            elif lt_ready: lo, hi = BAND_LT
             elif "lightning" in ew: lo, hi = BAND_VS_LT
             elif las is not None: lo, hi = BAND_LASER
             else: lo, hi = BAND_GUN
@@ -686,16 +700,17 @@ class Bot:
             grab = self.wanted_pickup(obs, W, slot, x, y, z, t, GRAB_R * min(1.5, self.aggr)) if hpf > 0.3 else None
             if grab:
                 gd = math.hypot(grab["pos"][0] - x, grab["pos"][1] - y); mode += " +grab"
-                if gd < self.reach: A["take"] = grab["id"]; A["drop"] = slot["laser"] if (all(W) and "laser" in slot) else None
+                if gd < self.reach: A["take"] = grab["id"]; A["drop"] = self.swap_slot(slot, W)
                 else: mv = self.toward(x, y, grab["pos"][0], grab["pos"][1])
                 if A.get("drop") is None: A.pop("drop", None)
             boost = (aimed_at_me and energy > 15) or (not lt_ready and energy > BOOST_E and tgt["d"] > 40)
+            if SNIPER and las is not None and tgt["d"] < lo and energy > 30: boost = True        # kite: keep them at range
         elif LOOT_CUBES and t - self.last_mech_dmg_t > 2.0 and not any(e["los"] and e["d"] < LOOT_SAFE for e in enemies) \
                 and self.loot_target(obs, me, W, slot, x, y, z, t) is not None:
             o = self.loot_target(obs, me, W, slot, x, y, z, t); px, py = o["pos"][0], o["pos"][1]; d = math.hypot(px - x, py - y)
             if "kind" in o and d < self.reach:
                 A["take"] = o["id"]
-                if not any(w is None for w in W) and "laser" in slot: A["drop"] = slot["laser"]
+                if self.swap_slot(slot, W) is not None: A["drop"] = self.swap_slot(slot, W)
             else: mv = self.toward(x, y, px, py); boost = energy > 40 and d > 15
             mode = "loot"
         elif NOOK and self.nook is not None and hunters_known and not unseen_hit:
@@ -726,7 +741,7 @@ class Bot:
                 if kind == "pickup":
                     if d < self.reach and abs(o["pos"][2] - z) < 3.5:
                         A["take"] = o["id"]
-                        if not any(w is None for w in W) and "laser" in slot: A["drop"] = slot["laser"]
+                        if self.swap_slot(slot, W) is not None: A["drop"] = self.swap_slot(slot, W)
                     else: mv = self.toward(x, y, px, py)
                 elif kind == "cube": mv = self.toward(x, y, px, py)
                 elif kind == "drop":
