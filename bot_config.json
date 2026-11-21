@@ -1,1 +1,1 @@
-{"VARIANT": "baseline", "TUNABLES": {"NPC_DEFENSE": true, "AMBUSH": true}}
+{"VARIANT": "baseline", "TUNABLES": {"NPC_DEFENSE": true, "CUBE_AVOID": true}}
