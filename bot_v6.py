@@ -61,6 +61,8 @@ EXPOSURE_COVER = False        # B: cover = nearest walkable cell hidden from eve
 BACK_WALL = False             # C: among nearby hidden cells prefer one with a wall behind us (no x1.5 rear hits)
 NPC_DEFENSE = False           # a drone shooting us becomes the target whenever no hunter is in sight (kill it, don't stand in it)
 STRICT_HIDDEN = False         # "am I in cover": centre and top rays at full resolution, and any hunter hit in the last 0.6 s = exposed
+LASER_EVADE = False           # sidestep ANY visible laser charging at us; break sight (to cover) from lasers hitting us from > 110 m
+LASER_FAR = 110.0             # beyond this a laser duel is a losing trade for our gun
 CUBE_AVOID = False            # at the stat cap, sidestep cubes: past 10 they only make us bigger (+5% size each)
 NOOK = False                  # once hunters are known, hold the most enclosed reachable cell (a chokepoint) facing its opening
 NOOK_MIN = 8                  # a nook has walls in >= this many of 16 directions within 18 m
@@ -201,7 +203,7 @@ class Bot:
         self.deathlog = DeathStateLogger(); self.cover_dist = None; self.cover_dist_t = -99.0
         self.aggr = AGGRESSION_SCALE; self.outnumbered_falls = 0
         self.resetting = False; self.reset_cover = None; self.reset_cover_t = -99.0; self.resets = 0
-        self.npc_hit = None
+        self.npc_hit = None; self.laser_hit = None
         self.nooks = None; self.nook = None; self.nook_t = -99.0; self.nook_field = None
         if NOOK and self.nav is not None and hasattr(self.nav, "ENC"): self.build_nooks()
         if VARIANT != "baseline": self.name = ("rabid-v6-" + str(VARIANT))[:32]
@@ -386,6 +388,29 @@ class Bot:
                 nv.field_step(self.nook_field[1], 2500, me_u if nv.F[me_u] else None); return
         self.advance_field(zone)
 
+    def laser_dodge(self, t, x, y, z, enemies, zs, energy):
+        """-> (move, boost, mode) or None. 1) any visible laser charging at us: keep a boosted lateral run;
+        2) a laser that hit us in the last 1.5 s from beyond LASER_FAR: break its line of sight (cover) instead of trading."""
+        if getattr(self, "_ld_t", None) == t: return self._ld
+        res = None
+        for e in enemies:
+            m = e["m"]
+            if not (e["los"] and m.get("charging") and m.get("aim")) or e["d"] < 30: continue
+            to_me = math.atan2(y - m["pos"][1], x - m["pos"][0])
+            if abs(wrap(m["aim"][0] - to_me)) < 0.12:
+                if t >= self.flip_t: self.flip_t = t + 0.9                  # commit to one direction for the charge
+                a = to_me + self.side * PI / 2; a = self.steer(x, y, a)
+                res = ((math.cos(a), math.sin(a)), energy > 10, "laser-dodge"); break
+        if res is None and self.laser_hit and t - self.laser_hit[0] < 1.5:
+            shooter = next((e for e in enemies if e["id"] == self.laser_hit[1]), None)
+            if shooter is not None and shooter["d"] > LASER_FAR:
+                thr = self.threat_points(t, enemies, x, y, z)
+                pc = self.pick_cover(x, y, z, thr, zs) if (EXPOSURE_COVER and thr) else None
+                if pc is not None:
+                    wx, wy = pc[2]; res = (self.toward(x, y, wx, wy), energy > 20, "laser-cover")
+        self._ld_t, self._ld = t, res
+        return res
+
     def is_hidden(self, t, x, y, z, thr):
         if not self.nav or not thr: return False
         if not STRICT_HIDDEN: return self.nav.hidden(x, y, z, thr)
@@ -503,6 +528,7 @@ class Bot:
                 self.last_dmg_t = t
                 if e.get("weapon") == "npc" and e.get("by") is not None: self.npc_angry[e["by"]] = t; self.npc_hit = (t, e.get("bearing"), e["by"])
                 elif e.get("weapon") not in ("zone", None):
+                    if e.get("weapon") == "laser" and e.get("by") is not None: self.laser_hit = (t, e["by"])
                     self.last_mech_dmg_t = t
                     if e.get("by") is not None: self.hit_by[e["by"]] = (t, e.get("bearing"), bool(e.get("rear")))
         if obs.get("offer"): A["pick"] = self.pick(obs["offer"])
@@ -610,6 +636,8 @@ class Bot:
                 else: self.cover = self.find_cover(x, y, z, pts, zs)[0]
                 self.cover_t = t
             mv = self.toward(x, y, self.cover[0], self.cover[1]); boost = energy > (35 if lt else 20); mode = "retreat"
+        elif LASER_EVADE and self.laser_dodge(t, x, y, z, enemies, zs, energy) is not None:
+            mv, boost, mode = self.laser_dodge(t, x, y, z, enemies, zs, energy)
         elif angry_npc is not None and not any(e["los"] for e in enemies):
             mv = self.strafe(x, y, angry_npc["pos"][0], angry_npc["pos"][1], angry_npc["d"], 30.0, 55.0, t); mode = "npc-defense"
         elif FIGHT_RESET and self.resetting and self.reset_cover is not None:
