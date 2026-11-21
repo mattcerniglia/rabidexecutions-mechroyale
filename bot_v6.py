@@ -61,6 +61,8 @@ EXPOSURE_COVER = False        # B: cover = nearest walkable cell hidden from eve
 BACK_WALL = False             # C: among nearby hidden cells prefer one with a wall behind us (no x1.5 rear hits)
 NPC_DEFENSE = False           # a drone shooting us becomes the target whenever no hunter is in sight (kill it, don't stand in it)
 STRICT_HIDDEN = False         # "am I in cover": centre and top rays at full resolution, and any hunter hit in the last 0.6 s = exposed
+CAMP = False                  # top-practice style: stand still to fight (<70 m), move silently while hunters are within 150 m,
+CAMP_CONTACT = 150.0          # no chasing / farming while in contact, full speed only when alone
 SNIPER = False                # prefer the laser (hitscan) and fight at SNIPER_BAND, kiting inward hunters: sloppy house aim decays with range
 SNIPER_BAND = (110.0, 170.0)
 LOOT_CUBES = False            # grab kill-drop cubes / wanted weapons within LOOT_R whenever no enemy has sight within 70 m
@@ -419,14 +421,14 @@ class Bot:
     def loot_target(self, obs, me, W, slot, x, y, z, t):
         """Nearest wanted pickup or (below the stat cap) cube within LOOT_R on our level; kill drops are the main source."""
         if getattr(self, "_lt_t", None) == t: return self._lt
-        best = None
-        wp = self.wanted_pickup(obs, W, slot, x, y, z, t, LOOT_R)
+        best = None; R = 30.0 if (CAMP and getattr(self, "contact_d", 1e9) < CAMP_CONTACT) else LOOT_R
+        wp = self.wanted_pickup(obs, W, slot, x, y, z, t, R)
         if wp is not None: best = (math.hypot(wp["pos"][0] - x, wp["pos"][1] - y) * 0.7, wp)
         if me["cubes"] < self.cube_cap:
             for c in obs["cubes"]:
                 if self.black.get(c["id"], -1) > t or abs(c["pos"][2] - z) > 3.5: continue
                 d = math.hypot(c["pos"][0] - x, c["pos"][1] - y)
-                if d < LOOT_R and (best is None or d < best[0]): best = (d, c)
+                if d < R and (best is None or d < best[0]): best = (d, c)
         self._lt_t, self._lt = t, (best[1] if best else None)
         return self._lt
 
@@ -632,6 +634,7 @@ class Bot:
         tp = self.mem.threat_point(t, x, y)
 
         hunters_known = bool(enemies) or any(t - tr["t"] < 30.0 for tr in self.mem.tracks.values()) or t - self.last_mech_dmg_t < 10.0
+        self.contact_d = min([e["d"] for e in enemies] + [math.hypot(tr["pos"][0] - x, tr["pos"][1] - y) for tr in self.mem.tracks.values() if t - tr["t"] < 10.0] + [1e9])
         at_nook = False
         if NOOK and self.nav and hasattr(self.nav, "ENC") and hunters_known:
             if self.nook is None or t - self.nook_t > 8.0 or not self.zone_ok(self.nook[0], self.nook[1], zs, walk):
@@ -732,10 +735,10 @@ class Bot:
             else: mode = "ambush"                            # hidden: let them come around the corner one at a time
         elif hidden and t - self.last_seen_t < 4.0:
             mode = "hold"                                    # it went behind cover: hold the angle, it has to come back out
-        elif hidden and hpf > 0.7 and not self.retreating and self.aggr >= 0.3:
+        elif hidden and hpf > 0.7 and not self.retreating and self.aggr >= 0.3 and not CAMP:
             e = min(hidden, key=lambda e: e["d"]); mv = self.toward(x, y, e["pos"][0], e["pos"][1], min(1.0, 0.6 * self.aggr)); mode = "hunt %d" % e["id"]
         else:
-            farm = None if (self.retreating or t - self.last_mech_dmg_t < 4.0) else self.farm_target(obs, me, x, y, z, zs, slot, walk, t)
+            farm = None if (self.retreating or t - self.last_mech_dmg_t < 4.0 or (CAMP and self.contact_d < CAMP_CONTACT)) else self.farm_target(obs, me, x, y, z, zs, slot, walk, t)
             if farm:
                 _, kind, o = farm; px, py = o["pos"][0], o["pos"][1]; d = math.hypot(px - x, py - y); mode = "farm " + kind
                 if kind == "pickup":
@@ -759,6 +762,13 @@ class Bot:
             if px or py:
                 vx, vy = mv[0] + 1.5 * px, mv[1] + 1.5 * py; n = math.hypot(vx, vy) or 1.0; m0 = math.hypot(*mv)
                 mv = (vx / n * m0, vy / n * m0)
+        if CAMP:
+            if mode.startswith("fight") and tgt is not None and tgt["d"] >= 15:
+                mv = (0.0, 0.0); boost = False                       # stand and shoot
+            elif self.contact_d < CAMP_CONTACT and mode.split(" ")[0] in ("walk", "farm", "loot", "->nook", "ambush-move", "hunt", "idle", "hold", "nook", "ambush"):
+                m0 = math.hypot(*mv); cap = 0.95 * self.step_speed / walk
+                if m0 > cap: mv = (mv[0] / m0 * cap, mv[1] / m0 * cap)
+                boost = False                                        # silent: no footsteps while hunters are near
         # stuck: wanted to move for 3 s but never got 1.5 m from where we were
         moving = math.hypot(*mv) > 0.2
         self.hist.append((t, x, y, moving)); self.hist = [h for h in self.hist if t - h[0] <= 3.0]
