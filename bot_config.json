@@ -1,1 +1,1 @@
-{"VARIANT": "baseline", "TUNABLES": {"NPC_DEFENSE": true, "LOOT_CUBES": true, "LOOT_R": 100.0, "LOOT_SAFE": 45.0}}
+{"VARIANT": "baseline", "TUNABLES": {"NPC_DEFENSE": true, "LOOT_CUBES": true, "NOOK": true}}
